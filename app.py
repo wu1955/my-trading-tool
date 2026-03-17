@@ -6,12 +6,12 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # Seite konfigurieren
-st.set_page_config(page_title="Quant-Terminal Pro", layout="wide")
+st.set_page_config(page_title="Quant-Terminal Pro (Final)", layout="wide")
 
 # --- 1. SEITENLEISTE ---
 with st.sidebar:
     st.header("🔬 Strategie-Zentrale")
-    symbols_str = st.text_input("Aktien (z.B. AAPL, NVDA)", value="AAPL, NVDA")
+    symbols_str = st.text_input("Aktien (z.B. AAPL, NVDA, 600519.SS)", value="AAPL, NVDA")
     symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
     
     st.subheader("📏 EMA-Trend-Filter")
@@ -22,6 +22,7 @@ with st.sidebar:
     st.subheader("📊 Filter-Faktoren")
     v_rel_limit = st.slider("Relat. Volumen (x)", 0.5, 5.0, 1.2)
     beta_limit = st.slider("Max. Beta (US)", 0.5, 4.0, 2.0)
+    perf_3m_min = st.slider("3M Performance Min (%)", -50, 50, 0) # <--- WIEDER DA!
     
     st.subheader("⏱️ Exit-Management")
     max_hold = st.slider("Max. Haltedauer (Tage)", 1, 60, 20)
@@ -39,10 +40,12 @@ def run_backtest(symbol, df_raw, mkt_ret):
         
         if len(df) < 200: return None
 
+        # Indikatoren
         df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean()
         df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
         df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
         df['Rel_Vol'] = df['Volume'] / df['Volume'].rolling(21).mean()
+        df['Perf_3M'] = (df['Close'] / df['Close'].shift(60) - 1) * 100 # <--- BERECHNUNG
         
         ret = df['Close'].pct_change()
         common = ret.index.intersection(mkt_ret.index)
@@ -52,12 +55,13 @@ def run_backtest(symbol, df_raw, mkt_ret):
         else:
             df['Beta'] = 0.0
 
-        # Kauf-Trigger
+        # Kauf-Trigger inkl. 3M Performance
         trigger = pd.Series([True] * len(df), index=df.index)
         if f_check: trigger &= (df['Close'] > df['EMA10'])
         if m_check: trigger &= (df['Close'] > df['EMA20'])
         if l_check: trigger &= (df['Close'] > df['EMA200'])
         trigger &= (df['Rel_Vol'] > v_rel_limit)
+        trigger &= (df['Perf_3M'] > perf_3m_min) # <--- LOGIK-FILTER
         if beta_limit > 0: trigger &= ((df['Beta'] < beta_limit) | (df['Beta'] == 0))
         df['Trigger'] = trigger.astype(int)
 
@@ -83,10 +87,10 @@ def run_backtest(symbol, df_raw, mkt_ret):
         return df
     except: return None
 
-# --- 3. DISPLAY ---
+# --- 3. DARSTELLUNG ---
 try:
     if symbols:
-        with st.spinner('Analysiere...'):
+        with st.spinner('Analysiere Strategien...'):
             all_data = yf.download(symbols + ["^GSPC"], start=start_date)
             mkt_ret = all_data['Close']["^GSPC"].pct_change()
             
@@ -96,12 +100,12 @@ try:
                 if res is not None: results_map[s] = res
 
         if results_map:
-            # A. Arena-Chart
-            st.title("🏆 Strategie-Arena")
+            # A. Arena
+            st.title("🏆 Die Strategie-Arena")
             fig_arena = go.Figure()
             for s, res_df in results_map.items():
                 fig_arena.add_trace(go.Scatter(x=res_df.index, y=res_df['Cum_Strategy'], name=s))
-            fig_arena.update_layout(template="plotly_white", height=400)
+            fig_arena.update_layout(template="plotly_white", height=400, title="Rendite-Vergleich")
             st.plotly_chart(fig_arena, use_container_width=True)
 
             # B. Detail-Analyse
@@ -109,9 +113,8 @@ try:
             selected_s = st.selectbox("🎯 Detail-Analyse wählen (Logbuch & Orange Kurve):", list(results_map.keys()))
             d_df = results_map[selected_s]
             
-            # Detail-Chart mit ORANGER Kurve
             fig_detail = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-                                       subplot_titles=('Preis & EMAs', 'Strategie-Rendite (Orange)'),
+                                       subplot_titles=('Preis & EMAs', f'Strategie-Rendite {selected_s} (Orange)'),
                                        row_heights=[0.6, 0.4])
             fig_detail.add_trace(go.Scatter(x=d_df.index, y=d_df['Close'], name='Preis', line=dict(color='black', width=1)), row=1, col=1)
             fig_detail.add_trace(go.Scatter(x=d_df.index, y=d_df['EMA10'], name='EMA10', line=dict(color='blue')), row=1, col=1)
@@ -132,7 +135,7 @@ try:
                     "Kauf": b_dates[i].date(), "Verkauf": e_dates[i].date(),
                     "Kaufpreis": round(d_df.loc[b_dates[i], 'Close'], 2),
                     "Verkaufspreis": round(d_df.loc[e_dates[i], 'Close'], 2),
-                    "Rendite %": round((d_df.loc[e_dates[i], 'Close']/d_df.loc[b_dates[i], 'Close']-1)*100, 2),
+                    "Ergebnis %": round((d_df.loc[e_dates[i], 'Close']/d_df.loc[b_dates[i], 'Close']-1)*100, 2),
                     "Grund": d_df.loc[e_dates[i], 'Exit_Reason']
                 })
             
