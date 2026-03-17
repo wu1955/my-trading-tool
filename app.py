@@ -1,48 +1,80 @@
 import streamlit as st
+import yfinance as yf
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit.components.v1 as components
 
-# 页面配置
-st.set_page_config(page_title="我的私人美股分析工具", layout="wide")
+# 1. 基础配置
+st.set_page_config(page_title="我的私人美股回测系统", layout="wide")
+st.title("📈 美股策略回测与实时行情")
 
-# 侧边栏：输入
+# 2. 侧边栏：参数输入
 with st.sidebar:
-    st.title("⚙️ 策略设置")
-    # 尝试使用简写的代码，如 AAPL 或 TSLA
-    symbol_input = st.text_input("股票代码 (如: AAPL)", value="AAPL")
-    interval = st.selectbox("周期", ["D", "W", "120", "60", "30", "15", "5"], index=0)
+    st.header("⚙️ 策略设置")
+    symbol = st.text_input("股票代码 (如: AAPL)", value="AAPL")
+    ma_fast = st.slider("短期均线周期", 5, 50, 20)
+    ma_slow = st.slider("长期均线周期", 20, 200, 60)
+    start_date = st.date_input("回测起始日期", value=pd.to_datetime("2023-01-01"))
+    btn = st.button("开始回测并更新图表")
+
+# 3. 逻辑处理：获取数据并回测
+try:
+    # 获取雅虎财经历史数据
+    df = yf.download(symbol, start=start_date)
     
-    st.write("---")
-    st.write("💡 提示：如果图表仍不显示，请尝试切换网络（如手机热点）。")
+    if not df.empty:
+        # 计算策略
+        df['Fast_MA'] = df['Close'].rolling(window=ma_fast).mean()
+        df['Slow_MA'] = df['Close'].rolling(window=ma_slow).mean()
+        
+        # 交易信号：金叉买入，死叉卖出
+        df['Signal'] = 0.0
+        df['Signal'] = (df['Fast_MA'] > df['Slow_MA']).astype(float)
+        df['Returns'] = df['Close'].pct_change()
+        df['Strategy_Returns'] = df['Returns'] * df['Signal'].shift(1)
+        df['Cum_Returns'] = (1 + df['Strategy_Returns'].fillna(0)).cumprod()
+        df['Market_Returns'] = (1 + df['Returns'].fillna(0)).cumprod()
 
-# 主界面标题
-st.title(f"📊 {symbol_input} 实时行情分析")
+        # 4. 显示回测指标（台式机必显部分）
+        col1, col2, col3 = st.columns(3)
+        final_return = (df['Cum_Returns'].iloc[-1] - 1) * 100
+        market_return = (df['Market_Returns'].iloc[-1] - 1) * 100
+        
+        col1.metric("策略累计收益", f"{final_return:.2f}%")
+        col2.metric("同期基准收益", f"{market_return:.2f}%")
+        col3.metric("交易次数", int(df['Signal'].diff().abs().sum() / 2))
 
-# TradingView 增强版嵌入代码
-# 使用了更稳定的官方 URL 和标准的容器 ID
+        # 绘制收益对比图
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Returns'], name='策略收益', line=dict(color='orange')))
+        fig.add_trace(go.Scatter(x=df.index, y=df['Market_Returns'], name='持有收益', line=dict(color='gray', dash='dash')))
+        fig.update_layout(title="收益增长对比图", template="plotly_dark", height=400)
+        st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.warning("未找到股票数据，请检查代码输入是否正确。")
+except Exception as e:
+    st.error(f"回测出错: {e}")
+
+st.write("---")
+
+# 5. 实时行情部分（TradingView 嵌入）
+st.subheader("📺 实时看盘图表")
 tv_html = f"""
-<div class="tradingview-widget-container" style="height: 600px; width: 100%;">
-  <div id="tv_chart_container" style="height: 100%; width: 100%;"></div>
+<div style="height: 500px;">
+  <div id="tv_chart"></div>
   <script type="text/javascript" src="https://s3.tradingview.com"></script>
   <script type="text/javascript">
   new TradingView.widget({{
-    "width": "100%",
-    "height": 600,
-    "symbol": "{symbol_input}",
-    "interval": "{interval}",
-    "timezone": "Etc/UTC",
+    "autosize": true,
+    "symbol": "{symbol}",
+    "interval": "D",
     "theme": "dark",
     "style": "1",
     "locale": "zh_CN",
-    "toolbar_bg": "#f1f3f6",
-    "enable_publishing": false,
-    "allow_symbol_change": true,
-    "container_id": "tv_chart_container"
+    "container_id": "tv_chart"
   }});
   </script>
 </div>
 """
-
-# 渲染图表
-components.html(tv_html, height=620)
-
-st.success("✅ 网页已连接至 TradingView 数据中心")
+components.html(tv_html, height=520)
