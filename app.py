@@ -5,106 +5,121 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="高级多因子策略实验室", layout="wide")
+# 页面配置
+st.set_page_config(page_title="私人量化交易实验室-白色主题版", layout="wide")
 
-# --- 1. 侧边栏：多维度参数设定 ---
+# --- 1. 侧边栏：参数设定 ---
 with st.sidebar:
-    st.header("🔬 因子过滤器")
+    st.header("🔬 核心策略因子")
     symbol = st.text_input("股票代码", value="AAPL")
     
-    st.subheader("📊 成交量因子")
-    v_period = st.slider("月均成交量周期(天)", 5, 60, 21)
-    v_rel_ratio = st.slider("相对成交量倍数 (当前/均值)", 0.5, 5.0, 1.2)
+    st.subheader("⏱️ 持仓管理")
+    hold_days = st.slider("买入后强制持仓天数", 1, 60, 10)
     
-    st.subheader("📈 价格动量")
-    lookback_days = st.slider("表现回顾周期(天)", 10, 250, 60)
-    min_perf = st.slider("最低区间涨跌幅 (%)", -50, 100, 10)
+    st.subheader("📏 EMA 均线系统")
+    ema_fast_val = st.number_input("短线 EMA (如10)", value=10)
+    ema_mid_val = st.number_input("中线 EMA (如20)", value=20)
+    ema_long_val = st.number_input("长线 EMA (如200)", value=200)
     
-    st.subheader("📉 风险因子 (Beta)")
-    beta_limit = st.slider("最大允许 Beta (波动率对比)", 0.5, 3.0, 1.5)
+    st.subheader("📊 过滤因子")
+    v_rel_ratio = st.slider("相对成交量倍数", 0.5, 5.0, 1.2)
+    beta_limit = st.slider("最大允许 Beta", 0.5, 3.0, 1.5)
     
-    start_date = st.date_input("回测起始日期", value=pd.to_datetime("2022-01-01"))
+    start_date = st.date_input("回测起始日期", value=pd.to_datetime("2021-01-01"))
 
 # --- 2. 核心计算引擎 ---
 try:
-    # 同时获取个股和基准(标普500)数据来计算 Beta
+    # 获取数据
     tickers = [symbol, "^GSPC"]
     data = yf.download(tickers, start=start_date)
     
     if not data.empty:
-        # 清理多层表头
+        # 处理表头逻辑
         if isinstance(data.columns, pd.MultiIndex):
-            close = data['Close'][symbol]
-            volume = data['Volume'][symbol]
+            close = data['Close'][symbol]; volume = data['Volume'][symbol]
             mkt_close = data['Close']["^GSPC"]
         else:
-            close = data[symbol] # 某些版本兼容
+            close = data[symbol]; volume = 0 
             
-        # --- 计算各种因子 ---
-        # 1. 月均成交量与成交额
-        df = pd.DataFrame({'Close': close, 'Volume': volume})
-        df['Avg_Vol'] = df['Volume'].rolling(window=v_period).mean()
-        df['Rel_Vol'] = df['Volume'] / df['Avg_Vol']
-        df['Turnover'] = df['Close'] * df['Volume'] # 当日成交额
+        df = pd.DataFrame({'Close': close, 'Volume': volume}).copy()
         
-        # 2. 区间涨跌幅 (3个月/自定义周期)
-        df['Perf'] = (df['Close'] / df['Close'].shift(lookback_days) - 1) * 100
+        # 指标计算
+        df['EMA10'] = df['Close'].ewm(span=ema_fast_val, adjust=False).mean()
+        df['EMA20'] = df['Close'].ewm(span=ema_mid_val, adjust=False).mean()
+        df['EMA200'] = df['Close'].ewm(span=ema_long_val, adjust=False).mean()
+        df['Rel_Vol'] = df['Volume'] / df['Volume'].rolling(21).mean()
         
-        # 3. 计算 Beta (个股收益与大盘收益的相关性)
-        df['Ret'] = df['Close'].pct_change()
-        df['Mkt_Ret'] = mkt_close.pct_change()
-        # 滚动计算 60 天 Beta
-        covariance = df['Ret'].rolling(60).cov(df['Mkt_Ret'])
-        variance = df['Mkt_Ret'].rolling(60).var()
-        df['Beta'] = covariance / variance
+        # Beta 计算
+        ret = df['Close'].pct_change()
+        mkt_ret = mkt_close.pct_change()
+        df['Beta'] = ret.rolling(60).cov(mkt_ret) / mkt_ret.rolling(60).var()
 
-        # --- 💡 核心：在这里组合你的【专属策略】 ---
-        # 逻辑：相对成交量够大 + 近期涨幅达标 + 波动率(Beta)不过高
-        buy_condition = (
-            (df['Rel_Vol'] > v_rel_ratio) & 
-            (df['Perf'] > min_perf) & 
+        # --- 💡 持仓逻辑模拟 ---
+        df['Trigger'] = (
+            (df['Close'] > df['EMA10']) & (df['EMA10'] > df['EMA20']) & 
+            (df['Close'] > df['EMA200']) & (df['Rel_Vol'] > v_rel_ratio) & 
             (df['Beta'] < beta_limit)
-        )
-        
-        df['Signal'] = 0.0
-        df.loc[buy_condition, 'Signal'] = 1.0
+        ).astype(int)
 
-        # 收益统计
-        df['Strategy_Returns'] = (df['Ret'] * df['Signal'].shift(1)).fillna(0)
+        signals = np.zeros(len(df))
+        cooldown = 0
+        for i in range(len(df)):
+            if cooldown > 0:
+                signals[i] = 1
+                cooldown -= 1
+            elif df['Trigger'].iloc[i] == 1:
+                signals[i] = 1
+                cooldown = hold_days - 1
+        
+        df['Signal'] = signals
+        df['Strategy_Returns'] = (ret * df['Signal'].shift(1)).fillna(0)
         df['Cum_Strategy'] = (1 + df['Strategy_Returns']).cumprod()
-        df['Cum_Market'] = (1 + df['Ret'].fillna(0)).cumprod()
+        df['Cum_Market'] = (1 + ret.fillna(0)).cumprod()
 
-        # --- 3. 绘图展示 ---
+        # --- 3. 绘图展示 (高对比度白色主题) ---
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-                           subplot_titles=('价格', '因子观察 (相对成交量 & Beta)', '累计收益对比'),
-                           row_heights=[0.4, 0.3, 0.3])
+                           subplot_titles=('股价与 EMA 系统', '因子观察 (相对成交量 & Beta)', f'策略累计收益 (持仓限制: {hold_days}天)'),
+                           row_heights=[0.5, 0.25, 0.25])
         
-        # Row 1: 价格
-        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='股价', line=dict(color='white')), row=1, col=1)
-        
-        # Row 2: 因子 (相对成交量)
-        fig.add_trace(go.Bar(x=df.index, y=df['Rel_Vol'], name='相对成交量', marker_color='purple', opacity=0.5), row=2, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['Beta'], name='Beta值', line=dict(color='yellow')), row=2, col=1)
-        fig.add_hline(y=v_rel_ratio, line_dash="dash", line_color="red", row=2, col=1)
+        # Row 1: 股价 (深色线)
+        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='股价', line=dict(color='#1f77b4', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA10'], name='EMA10', line=dict(color='#ff7f0e', width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], name='EMA20', line=dict(color='#2ca02c', width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA200'], name='EMA200', line=dict(color='#d62728', width=2)), row=1, col=1)
 
-        # Row 3: 收益
-        fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Strategy'], name='策略收益', line=dict(color='orange', width=3)), row=3, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Market'], name='基准收益', line=dict(color='gray', dash='dot')), row=3, col=1)
+        # Row 2: 因子
+        fig.add_trace(go.Bar(x=df.index, y=df['Rel_Vol'], name='相对成交量', marker_color='#9467bd', opacity=0.4), row=2, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['Beta'], name='Beta', line=dict(color='#8c564b')), row=2, col=1)
 
-        # 标注买点
-        df['Trade'] = df['Signal'].diff()
-        buys = df[df['Trade'] == 1]
-        fig.add_trace(go.Scatter(x=buys.index, y=df.loc[buys.index, 'Cum_Strategy'], mode='markers', 
-                                marker=dict(symbol='star', size=12, color='lime'), name='买入信号'), row=3, col=1)
+        # Row 3: 收益曲线
+        fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Strategy'], name='策略收益', line=dict(color='#006400', width=3)), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Market'], name='指数基准', line=dict(color='#7f7f7f', dash='dot')), row=3, col=1)
 
-        fig.update_layout(height=900, template="plotly_dark", hovermode="x unified")
+        # 标注买点 (红色五角星)
+        df['Entry'] = ((df['Signal'] == 1) & (df['Signal'].shift(1) == 0)).astype(int)
+        entries = df[df['Entry'] == 1]
+        fig.add_trace(go.Scatter(
+            x=entries.index, 
+            y=df.loc[entries.index, 'Cum_Strategy'], 
+            mode='markers', 
+            marker=dict(symbol='star', size=14, color='red', line=dict(width=1, color='black')), 
+            name='买入进场'
+        ), row=3, col=1)
+
+        # 强制设置白色主题
+        fig.update_layout(height=1000, template="plotly_white", hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
         
-        # 显示实时因子数值表格
-        st.subheader("📋 当前因子实时数值")
-        st.table(df[['Close', 'Rel_Vol', 'Beta', 'Perf']].tail(1))
+        # 统计报表
+        st.subheader("📊 策略实测报告")
+        total_ret = (df['Cum_Strategy'].iloc[-1] - 1) * 100
+        trade_count = int(df['Entry'].sum())
+        cols = st.columns(3)
+        cols.metric("累计总收益率", f"{total_ret:.2f}%", delta=f"{total_ret - (df['Cum_Market'].iloc[-1]-1)*100:.2f}% (超额)")
+        cols.metric("总交易次数", f"{trade_count} 次")
+        cols.metric("状态", "空仓" if cooldown==0 else f"持仓中({cooldown}天)")
 
     else:
         st.warning("未找到数据。")
 except Exception as e:
-    st.error(f"逻辑错误: {e}。可能是因为回测时间太短导致 Beta 无法计算，请拉长时间。")
+    st.error(f"逻辑错误: {e}")
