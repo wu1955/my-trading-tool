@@ -2,11 +2,11 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-import streamlit.components.v1 as components
+from plotly.subplots import make_subplots
 
 # 1. 基础配置
 st.set_page_config(page_title="我的私人美股回测系统", layout="wide")
-st.title("📈 美股策略回测与实时行情")
+st.title("📈 美股策略回测与专业 K 线")
 
 # 2. 侧边栏：参数输入
 with st.sidebar:
@@ -15,66 +15,57 @@ with st.sidebar:
     ma_fast = st.slider("短期均线周期", 5, 50, 20)
     ma_slow = st.slider("长期均线周期", 20, 200, 60)
     start_date = st.date_input("回测起始日期", value=pd.to_datetime("2023-01-01"))
-    btn = st.button("开始回测并更新图表")
+    st.write("---")
+    st.info("💡 此版本不再依赖外部脚本，确保所有设备均可显示。")
 
-# 3. 逻辑处理：获取数据并回测
+# 3. 获取数据并计算
 try:
-    # 获取雅虎财经历史数据
     df = yf.download(symbol, start=start_date)
-    
     if not df.empty:
-        # 计算策略
         df['Fast_MA'] = df['Close'].rolling(window=ma_fast).mean()
         df['Slow_MA'] = df['Close'].rolling(window=ma_slow).mean()
         
-        # 交易信号：金叉买入，死叉卖出
-        df['Signal'] = 0.0
+        # 交易逻辑
         df['Signal'] = (df['Fast_MA'] > df['Slow_MA']).astype(float)
+        df['Position'] = df['Signal'].diff() # 1为金叉买入，-1为死叉卖出
+        
+        # 收益计算
         df['Returns'] = df['Close'].pct_change()
         df['Strategy_Returns'] = df['Returns'] * df['Signal'].shift(1)
         df['Cum_Returns'] = (1 + df['Strategy_Returns'].fillna(0)).cumprod()
         df['Market_Returns'] = (1 + df['Returns'].fillna(0)).cumprod()
 
-        # 4. 显示回测指标（台式机必显部分）
-        col1, col2, col3 = st.columns(3)
-        final_return = (df['Cum_Returns'].iloc[-1] - 1) * 100
-        market_return = (df['Market_Returns'].iloc[-1] - 1) * 100
-        
-        col1.metric("策略累计收益", f"{final_return:.2f}%")
-        col2.metric("同期基准收益", f"{market_return:.2f}%")
-        col3.metric("交易次数", int(df['Signal'].diff().abs().sum() / 2))
+        # 4. 显示核心指标
+        c1, c2, c3 = st.columns(3)
+        c1.metric("策略累计收益", f"{(df['Cum_Returns'].iloc[-1]-1)*100:.2f}%")
+        c2.metric("同期基准收益", f"{(df['Market_Returns'].iloc[-1]-1)*100:.2f}%")
+        c3.metric("当前状态", "持仓" if df['Signal'].iloc[-1] > 0 else "空仓")
 
-        # 绘制收益对比图
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Returns'], name='策略收益', line=dict(color='orange')))
-        fig.add_trace(go.Scatter(x=df.index, y=df['Market_Returns'], name='持有收益', line=dict(color='gray', dash='dash')))
-        fig.update_layout(title="收益增长对比图", template="plotly_dark", height=400)
+        # 5. 绘制专业 K 线图（包含均线和买卖信号）
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                           vertical_spacing=0.05, subplot_titles=(f'{symbol} K线与均线', '策略累计收益'),
+                           row_heights=[0.7, 0.3])
+
+        # K线图
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'],
+                                    low=df['Low'], close=df['Close'], name='K线'), row=1, col=1)
+        # 均线
+        fig.add_trace(go.Scatter(x=df.index, y=df['Fast_MA'], line=dict(color='yellow', width=1), name=f'{ma_fast}MA'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['Slow_MA'], line=dict(color='blue', width=1), name=f'{ma_slow}MA'), row=1, col=1)
+
+        # 买卖标记
+        buys = df[df['Position'] == 1]
+        sells = df[df['Position'] == -1]
+        fig.add_trace(go.Scatter(x=buys.index, y=buys['Low']*0.98, mode='markers', 
+                                marker=dict(symbol='triangle-up', size=12, color='green'), name='买入信号'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=sells.index, y=sells['High']*1.02, mode='markers', 
+                                marker=dict(symbol='triangle-down', size=12, color='red'), name='卖出信号'), row=1, col=1)
+
+        # 收益曲线
+        fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Returns'], line=dict(color='orange'), name='策略累计收益'), row=2, col=1)
+        
+        fig.update_layout(height=800, template="plotly_dark", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
-    else:
-        st.warning("未找到股票数据，请检查代码输入是否正确。")
 except Exception as e:
-    st.error(f"回测出错: {e}")
-
-st.write("---")
-
-# 5. 实时行情部分（TradingView 嵌入）
-st.subheader("📺 实时看盘图表")
-tv_html = f"""
-<div style="height: 500px;">
-  <div id="tv_chart"></div>
-  <script type="text/javascript" src="https://s3.tradingview.com"></script>
-  <script type="text/javascript">
-  new TradingView.widget({{
-    "autosize": true,
-    "symbol": "{symbol}",
-    "interval": "D",
-    "theme": "dark",
-    "style": "1",
-    "locale": "zh_CN",
-    "container_id": "tv_chart"
-  }});
-  </script>
-</div>
-"""
-components.html(tv_html, height=520)
+    st.error(f"数据加载失败: {e}")
