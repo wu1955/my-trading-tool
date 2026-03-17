@@ -5,113 +5,116 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# 页面配置
-st.set_page_config(page_title="高级趋势过滤器回测器", layout="wide")
+# Seite konfigurieren
+st.set_page_config(page_title="Quant-Master-Terminal", layout="wide")
 
-# --- 1. SEITENLEISTE: 增加动态过滤开关 ---
+# --- 1. SEITENLEISTE: Alle Parameter & Filter ---
 with st.sidebar:
-    st.header("🔬 策略实验室")
-    symbols_str = st.text_input("股票代码 (如 AAPL, NVDA)", value="AAPL")
-    symbols = [s.strip().upper() for s in symbols_str.split(",") if s.strip()]
+    st.header("🔬 Strategie-Zentrale")
+    symbol = st.text_input("Aktiensymbol (z.B. AAPL)", value="AAPL").upper()
     
-    st.subheader("📏 EMA 趋势过滤开关")
-    # 💡 这里的三个开关就是你要求的“股价与均线关系”
-    above_ema_f = st.checkbox("要求：股价 > 短期 EMA (10)", value=True)
-    above_ema_m = st.checkbox("要求：股价 > 中期 EMA (20)", value=True)
-    above_ema_l = st.checkbox("要求：股价 > 长期 EMA (200)", value=True)
+    st.subheader("📏 EMA-Trend-Filter")
+    # Ihre gewünschten Schalter für die Kauf-Bedingung
+    f_check = st.checkbox("Preis > EMA10 erforderlich", value=True)
+    m_check = st.checkbox("Preis > EMA20 erforderlich", value=True)
+    l_check = st.checkbox("Preis > EMA200 erforderlich", value=True)
     
-    st.write("---")
-    st.subheader("参数微调")
-    ema_f_val = st.number_input("短线 EMA 周期", value=10)
-    ema_m_val = st.number_input("中线 EMA 周期", value=20)
-    ema_l_val = st.number_input("长线 EMA 周期", value=200)
+    st.subheader("📊 Filter-Faktoren")
+    v_rel = st.slider("Relat. Volumen (x)", 0.5, 5.0, 1.2)
+    beta_lim = st.slider("Max. Beta (US)", 0.5, 4.0, 1.5)
+    perf_3m_min = st.slider("3M Performance Min (%)", -50, 50, 0)
     
-    max_hold = st.slider("最大持仓天数", 1, 60, 20)
-    start_date = st.date_input("起始日期", value=pd.to_datetime("2021-01-01"))
+    st.subheader("⏱️ Exit-Management")
+    max_hold = st.slider("Max. Haltedauer (Tage)", 1, 60, 20)
+    use_stop_loss = st.checkbox("EMA20-Breakout Stopp (Verkauf)", value=True)
+    
+    start_date = st.date_input("Startdatum", value=pd.to_datetime("2021-01-01"))
 
-# --- 2. 核心计算引擎 ---
-def run_backtest(symbol, df_all, mkt_close):
-    try:
-        if isinstance(df_all.columns, pd.MultiIndex):
-            df = df_all.xs(symbol, axis=1, level=1).dropna(subset=['Close'])
-        else:
-            df = df_all[['Close', 'Volume']].dropna()
-        
-        if len(df) < ema_l_val: return None
-
-        # 计算均线
-        df['EMA_F'] = df['Close'].ewm(span=ema_f_val, adjust=False).mean()
-        df['EMA_M'] = df['Close'].ewm(span=ema_m_val, adjust=False).mean()
-        df['EMA_L'] = df['Close'].ewm(span=ema_l_val, adjust=False).mean()
-        
-        # --- 💡 动态逻辑组装 ---
-        # 初始条件为 True (全选)
-        condition = pd.Series([True] * len(df), index=df.index)
-        
-        if above_ema_f:
-            condition &= (df['Close'] > df['EMA_F'])
-        if above_ema_m:
-            condition &= (df['Close'] > df['EMA_M'])
-        if above_ema_l:
-            condition &= (df['Close'] > df['EMA_L'])
-            
-        df['Trigger'] = condition.astype(int)
-
-        # 模拟持仓
-        signals = np.zeros(len(df)); in_pos = False; days = 0
-        ret = df['Close'].pct_change()
-        
-        for i in range(len(df)):
-            if in_pos:
-                if days >= max_hold or (df['Close'].iloc[i] < df['EMA_M'].iloc[i]): # 跌破中线止损
-                    in_pos = False; days = 0
-                else:
-                    signals[i] = 1; days += 1
-            elif df['Trigger'].iloc[i] == 1:
-                in_pos = True; signals[i] = 1; days = 1
-        
-        df['Signal'] = signals
-        df['Cum_Strategy'] = (1 + (ret * pd.Series(signals, index=df.index).shift(1)).fillna(0)).cumprod()
-        return df
-    except: return None
-
-# --- 3. 页面渲染 ---
+# --- 2. BACKTEST-KERN ---
 try:
-    if symbols:
-        data = yf.download(symbols + ["^GSPC"], start=start_date)
-        mkt_close = data['Close']["^GSPC"]
+    with st.spinner('Analysiere Daten...'):
+        # Daten laden (Aktie + S&P500 für Beta)
+        data = yf.download([symbol, "^GSPC"], start=start_date)
         
-        results_map = {}
-        for s in symbols:
-            res = run_backtest(s, data, mkt_close)
-            if res is not None: results_map[s] = res
-
-        # 选定展示的个股
-        selected_s = symbols[0] if len(symbols) == 1 else st.selectbox("选择分析个股", symbols)
-        
-        if selected_s in results_map:
-            d_df = results_map[selected_s]
+        if not data.empty and symbol in data['Close']:
+            df = pd.DataFrame({
+                'Close': data['Close'][symbol],
+                'Volume': data['Volume'][symbol]
+            }).dropna()
+            mkt_close = data['Close']["^GSPC"]
             
-            # 创建双图：上方股价+均线，下方橙色收益线
+            # Indikatoren berechnen
+            df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean()
+            df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
+            df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+            df['Rel_Vol'] = df['Volume'] / df['Volume'].rolling(21).mean()
+            df['Perf_3M'] = (df['Close'] / df['Close'].shift(60) - 1) * 100
+            
+            # Beta Berechnung
+            ret = df['Close'].pct_change()
+            mkt_ret = mkt_close.pct_change()
+            common = ret.index.intersection(mkt_ret.index)
+            df['Beta'] = (ret.loc[common].rolling(60).cov(mkt_ret.loc[common]) / 
+                          mkt_ret.loc[common].rolling(60).var()).reindex(df.index, method='ffill').fillna(0)
+
+            # --- KAUF-LOGIK (Trigger) ---
+            trigger = pd.Series([True] * len(df), index=df.index)
+            if f_check: trigger &= (df['Close'] > df['EMA10'])
+            if m_check: trigger &= (df['Close'] > df['EMA20'])
+            if l_check: trigger &= (df['Close'] > df['EMA200'])
+            
+            # Filter hinzufügen
+            trigger &= (df['Rel_Vol'] > v_rel)
+            trigger &= (df['Perf_3M'] > perf_3m_min)
+            if beta_lim > 0: trigger &= ((df['Beta'] < beta_lim) | (df['Beta'] == 0))
+            
+            df['Trigger'] = trigger.astype(int)
+
+            # --- SIMULATION (Exit-Logik) ---
+            signals = np.zeros(len(df))
+            in_pos = False; days = 0
+            for i in range(len(df)):
+                if in_pos:
+                    # Verkauf wenn Zeit abgelaufen ODER (wenn aktiviert) EMA20 gebrochen
+                    time_exit = days >= max_hold
+                    sl_exit = use_stop_loss and (df['Close'].iloc[i] < df['EMA20'].iloc[i])
+                    if time_exit or sl_exit:
+                        in_pos = False; days = 0
+                    else:
+                        signals[i] = 1; days += 1
+                elif df['Trigger'].iloc[i] == 1:
+                    in_pos = True; signals[i] = 1; days = 1
+            
+            df['Signal'] = signals
+            df['Cum_Strategy'] = (1 + (ret * pd.Series(signals, index=df.index).shift(1)).fillna(0)).cumprod()
+
+            # --- 3. GRAFIK (Zwei Etagen) ---
+            st.title(f"🔍 Analyse-Ergebnis für {symbol}")
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
-                               subplot_titles=(f'{selected_s} 价格与均线系统', '策略累计收益 (橙色线)'),
+                               subplot_titles=('Preis & EMA-Bänder', 'Strategie-Rendite (Orange)'),
                                row_heights=[0.6, 0.4])
             
-            # 上图
-            fig.add_trace(go.Scatter(x=d_df.index, y=d_df['Close'], name='股价', line=dict(color='black', width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=d_df.index, y=d_df['EMA_F'], name='短线EMA', line=dict(color='blue', width=1, dash='dot')), row=1, col=1)
-            fig.add_trace(go.Scatter(x=d_df.index, y=d_df['EMA_L'], name='长线EMA', line=dict(color='red', width=1.5)), row=1, col=1)
+            # Obere Etage: Preis & EMAs
+            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Preis', line=dict(color='black', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['EMA10'], name='EMA10', line=dict(color='blue', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], name='EMA20 (Stopp)', line=dict(color='green', dash='dot')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['EMA200'], name='EMA200', line=dict(color='red', width=1.5)), row=1, col=1)
             
-            # 下图：橙色收益曲线
-            fig.add_trace(go.Scatter(x=d_df.index, y=d_df['Cum_Strategy'], name='策略收益', 
+            # Untere Etage: ORANGE Renditekurve
+            fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Strategy'], name='Rendite', 
                                     line=dict(color='#FF8C00', width=3)), row=2, col=1)
             
             fig.update_layout(template="plotly_white", height=800, hovermode="x unified")
             st.plotly_chart(fig, use_container_width=True)
 
-            # 导出与报表 (保留之前的功能)
-            st.write("📈 **当前策略表现**")
-            st.metric("最终净值", f"{d_df['Cum_Strategy'].iloc[-1]:.2f}")
+            # Statistik-Zusammenfassung
+            c1, c2, c3 = st.columns(3)
+            c1.metric("End-Rendite", f"{(df['Cum_Strategy'].iloc[-1]-1)*100:.2f}%")
+            c2.metric("Beta (Aktuell)", f"{df['Beta'].iloc[-1]:.2f}")
+            c3.metric("Rel. Volumen", f"{df['Rel_Vol'].iloc[-1]:.2f}x")
+
+        else:
+            st.error("Symbol nicht gefunden oder keine Daten verfügbar.")
 
 except Exception as e:
-    st.error(f"发生错误: {e}")
+    st.error(f"Fehler: {e}")
